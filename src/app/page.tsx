@@ -14,19 +14,10 @@ import {
 import Pet from "@/components/Pet";
 import TodoList from "@/components/TodoList";
 import Sidebar from "@/components/Sidebar";
-
-export type Todo = {
-  id: number;
-  text: string;
-  completed: boolean;
-  userId: string;
-};
-
-const initialTodos: Todo[] = [
-  { id: 1, text: "朝ごはんを食べる", completed: false, userId: "demo-user" },
-  { id: 2, text: "メールを確認する", completed: false, userId: "demo-user" },
-  { id: 3, text: "10分だけ片付けする", completed: false, userId: "demo-user" },
-];
+import type { Todo } from "@/types/todo";
+import { loadUser, saveUser } from "@/lib/storage/userStorage";
+import { loadHunger, saveHunger } from "@/lib/storage/hungerStorage";
+import { supabase } from "@/lib/supabase/client";
 
 export default function Page() {
   const [userId, setUserId] = useState<string | null>(null);
@@ -36,88 +27,152 @@ export default function Page() {
   const [isLoaded, setIsLoaded] = useState(false);
   const [currentView, setCurrentView] = useState<"today" | "spaces" | "timer" | "pet">("today");
 
-  const handleLogin = () => {
+  const fetchTodos = async (targetUserId: string) => {
+    const { data, error } = await supabase
+      .from("todos")
+      .select("id, text, completed, user_id, created_at")
+      .eq("user_id", targetUserId)
+      .order("id", { ascending: false });
+
+    if (error) {
+      console.error("Failed to fetch todos:", error);
+      return;
+    }
+
+    const mappedTodos: Todo[] = (data ?? []).map((todo) => ({
+      id: todo.id,
+      text: todo.text,
+      completed: todo.completed,
+      userId: todo.user_id,
+      created_at: todo.created_at,
+    }));
+
+    setTodos(mappedTodos);
+  };
+
+  const handleLogin = async () => {
     if (!inputName.trim()) return;
 
     const id = inputName.trim();
     setUserId(id);
-    localStorage.setItem("userId", id);
+    saveUser(id);
 
-    const savedTodos = localStorage.getItem("todos");
-    if (!savedTodos) {
-      const demoTodos = initialTodos.map((todo) => ({
-        ...todo,
-        userId: id,
-      }));
-      setTodos(demoTodos);
-    }
+    await fetchTodos(id);
   };
 
   useEffect(() => {
-    const savedUser = localStorage.getItem("userId");
-    const savedTodos = localStorage.getItem("todos");
-    const savedHunger = localStorage.getItem("hunger");
-
-    if (savedUser) {
-      setUserId(savedUser);
-    }
-
-    if (savedTodos) {
+    const initialize = async () => {
       try {
-        setTodos(JSON.parse(savedTodos));
-      } catch {
-        setTodos([]);
+        const savedUser = loadUser();
+        const savedHunger = loadHunger();
+
+        if (savedUser) {
+          setUserId(savedUser);
+          await fetchTodos(savedUser);
+        }
+
+        if (savedHunger !== null) {
+          setHunger(savedHunger);
+        }
+      } catch (error) {
+        console.error("Failed to initialize page", error);
+      } finally {
+        setIsLoaded(true);
       }
-    }
+    };
 
-    if (savedHunger) {
-      setHunger(Number(savedHunger));
-    }
-
-    setIsLoaded(true);
+    initialize();
   }, []);
 
   useEffect(() => {
     if (!isLoaded) return;
-    localStorage.setItem("todos", JSON.stringify(todos));
-  }, [todos, isLoaded]);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-    localStorage.setItem("hunger", hunger.toString());
+    saveHunger(hunger);
   }, [hunger, isLoaded]);
 
-  const handleAddTodo = (text: string) => {
+  useEffect(() => {
+    if (!isLoaded || !userId) return;
+    saveUser(userId);
+  }, [userId, isLoaded]);
+
+  const handleAddTodo = async (text: string) => {
     if (!text.trim() || !userId) return;
 
+    const { data, error } = await supabase
+      .from("todos")
+      .insert([
+        {
+          text: text.trim(),
+          completed: false,
+          user_id: userId,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Failed to add todo:", error);
+      return;
+    }
+
     const newTodo: Todo = {
-      id: Date.now(),
-      text,
-      completed: false,
-      userId,
+      id: data.id,
+      text: data.text,
+      completed: data.completed,
+      userId: data.user_id,
+      created_at: data.created_at,
     };
 
     setTodos((prev) => [newTodo, ...prev]);
   };
 
-  const handleToggleTodo = (id: number) => {
-    const targetTodo = todos.find((todo) => todo.id === id);
-    if (!targetTodo) return;
+ const handleToggleTodo = async (id: number) => {
+  const targetTodo = todos.find((todo) => todo.id === id);
+  if (!targetTodo) return;
 
-    setTodos((prevTodos) =>
-      prevTodos.map((todo) =>
-        todo.id === id ? { ...todo, completed: !todo.completed } : todo
-      )
+  const nextCompleted = !targetTodo.completed;
+
+  const { error } = await supabase
+    .from("todos")
+    .update({ completed: nextCompleted })
+    .eq("id", id);
+
+  if (error) {
+    console.error("Failed to toggle todo:", error);
+    return;
+  }
+
+  setTodos((prevTodos) =>
+    prevTodos.map((todo) =>
+      todo.id === id ? { ...todo, completed: nextCompleted } : todo
+    )
+  );
+
+  if (!targetTodo.completed) {
+    setHunger((prev) => Math.min(prev + 20, 100));
+  }
+};
+
+  const handleDeleteTodo = async (id: number) => {
+  const { error } = await supabase
+    .from("todos")
+    .delete()
+    .eq("id", id);
+
+  if (error) {
+    console.error("Failed to delete todo:", error);
+    return;
+  }
+
+  setTodos((prevTodos) => prevTodos.filter((todo) => todo.id !== id));
+};
+
+  if (!isLoaded) {
+    return (
+      <Container py={10}>
+        <Text>読み込み中...</Text>
+      </Container>
     );
-
-    if (!targetTodo.completed) {
-      setHunger((prev) => Math.min(prev + 20, 100));
-    }
-  };
-
-  const handleDeleteTodo = (id: number) => {
-    setTodos((prevTodos) => prevTodos.filter((todo) => todo.id !== id));
-  };
+  }
 
   if (!userId) {
     return (
